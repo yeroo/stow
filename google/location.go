@@ -6,16 +6,19 @@ import (
 	"strings"
 
 	"github.com/graymeta/stow"
-	storage "google.golang.org/api/storage/v1"
+
+	"cloud.google.com/go/storage"
+	"context"
+	"google.golang.org/api/iterator"
 )
 
 // A Location contains a client + the configurations used to create the client.
 type Location struct {
 	config stow.Config
-	client *storage.Service
+	client *storage.Client
 }
 
-func (l *Location) Service() *storage.Service {
+func (l *Location) Service() *storage.Client {
 	return l.client
 }
 
@@ -27,11 +30,12 @@ func (l *Location) Close() error {
 
 // CreateContainer creates a new container, in this case a bucket.
 func (l *Location) CreateContainer(containerName string) (stow.Container, error) {
-
+	ctx := context.Background()
 	projId, _ := l.config.Config(ConfigProjectId)
+
+	bkt := l.client.Bucket(containerName)
 	// Create a bucket.
-	_, err := l.client.Buckets.Insert(projId, &storage.Bucket{Name: containerName}).Do()
-	//res, err := l.client.Buckets.Insert(projId, &storage.Bucket{Name: containerName}).Do()
+	err := bkt.Create(ctx, projId, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -46,41 +50,40 @@ func (l *Location) CreateContainer(containerName string) (stow.Container, error)
 
 // Containers returns a slice of the Container interface, a cursor, and an error.
 func (l *Location) Containers(prefix string, cursor string, count int) ([]stow.Container, string, error) {
-
+	ctx := context.Background()
 	projId, _ := l.config.Config(ConfigProjectId)
 
 	// List all objects in a bucket using pagination
-	call := l.client.Buckets.List(projId).MaxResults(int64(count))
+	iter := l.client.Buckets(ctx, projId)
 
-	if prefix != "" {
-		call.Prefix(prefix)
+	if len(prefix) > 0 {
+		iter.Prefix = prefix
 	}
 
-	if cursor != "" {
-		call = call.PageToken(cursor)
-	}
+	pager := iterator.NewPager(iter, count, cursor)
+	bucketAttrs := make([]*storage.BucketAttrs, 0)
 
-	res, err := call.Do()
+	nextToken, err := pager.NextPage(bucketAttrs)
 	if err != nil {
 		return nil, "", err
 	}
-	containers := make([]stow.Container, len(res.Items))
-
-	for i, o := range res.Items {
-		containers[i] = &Container{
-			name:   o.Name,
+	containers := make([]stow.Container, len(bucketAttrs))
+	for _, bucketAttr := range bucketAttrs {
+		containers = append(containers, &Container{
+			name:   bucketAttr.Name,
 			client: l.client,
-		}
+		})
 	}
 
-	return containers, res.NextPageToken, nil
+	return containers, nextToken, nil
 }
 
 // Container retrieves a stow.Container based on its name which must be
 // exact.
 func (l *Location) Container(id string) (stow.Container, error) {
 
-	_, err := l.client.Buckets.Get(id).Do()
+	_, err := l.client.Bucket(id).Attrs(context.Background())
+
 	if err != nil {
 		return nil, stow.ErrNotFound
 	}
@@ -96,7 +99,9 @@ func (l *Location) Container(id string) (stow.Container, error) {
 // RemoveContainer removes a container simply by name.
 func (l *Location) RemoveContainer(id string) error {
 
-	if err := l.client.Buckets.Delete(id).Do(); err != nil {
+	bkt := l.client.Bucket(id)
+
+	if err := bkt.Delete(context.Background()); err != nil {
 		return err
 	}
 

@@ -2,11 +2,13 @@ package google
 
 import (
 	"io"
-	"time"
-
 	"github.com/graymeta/stow"
 	"github.com/pkg/errors"
-	storage "google.golang.org/api/storage/v1"
+
+	"cloud.google.com/go/storage"
+	"context"
+	"google.golang.org/api/iterator"
+	"fmt"
 )
 
 type Container struct {
@@ -14,7 +16,7 @@ type Container struct {
 	name string
 
 	// Client is responsible for performing the requests.
-	client *storage.Service
+	client *storage.Client
 }
 
 // ID returns a string value which represents the name of the container.
@@ -27,21 +29,17 @@ func (c *Container) Name() string {
 	return c.name
 }
 
-func (c *Container) Bucket() (*storage.Bucket, error) {
-	return c.client.Buckets.Get(c.name).Do()
+func (c *Container) Bucket() (*storage.BucketHandle) {
+	return c.client.Bucket(c.name)
 }
 
 // Item returns a stow.Item instance of a container based on the
 // name of the container
 func (c *Container) Item(id string) (stow.Item, error) {
-	res, err := c.client.Objects.Get(c.name, id).Do()
+	obj := c.client.Bucket(c.name).Object(id)
+	res, err := obj.Attrs(context.Background())
 	if err != nil {
 		return nil, stow.ErrNotFound
-	}
-
-	t, err := time.Parse(time.RFC3339, res.Updated)
-	if err != nil {
-		return nil, err
 	}
 
 	u, err := prepUrl(res.MediaLink)
@@ -59,12 +57,11 @@ func (c *Container) Item(id string) (stow.Item, error) {
 		container:    c,
 		client:       c.client,
 		size:         int64(res.Size),
-		etag:         res.Etag,
-		hash:         res.Md5Hash,
-		lastModified: t,
+		hash:         fmt.Sprintf("%x", res.MD5),
+		lastModified: res.Updated,
 		url:          u,
 		metadata:     mdParsed,
-		object:       res,
+		object:       obj,
 	}
 
 	return i, nil
@@ -74,79 +71,73 @@ func (c *Container) Item(id string) (stow.Item, error) {
 // the prefix argument. The 'cursor' variable facilitates pagination.
 func (c *Container) Items(prefix string, cursor string, count int) ([]stow.Item, string, error) {
 	// List all objects in a bucket using pagination
-	call := c.client.Objects.List(c.name).MaxResults(int64(count))
 
-	if prefix != "" {
-		call.Prefix(prefix)
+	bkt := c.client.Bucket(c.name)
+	var q *storage.Query = nil
+	if len(prefix) > 0 {
+		q = &storage.Query{
+			Prefix: prefix,
+		}
 	}
+	iter := bkt.Objects(context.Background(), q)
+	pager := iterator.NewPager(iter, count, cursor)
+	objs := make([]*storage.ObjectHandle, 0)
 
-	if cursor != "" {
-		call = call.PageToken(cursor)
-	}
-
-	res, err := call.Do()
+	nextToken, err := pager.NextPage(objs)
 	if err != nil {
 		return nil, "", err
 	}
-	containerItems := make([]stow.Item, len(res.Items))
+	containerItems := make([]stow.Item, 0, len(objs))
 
-	for i, o := range res.Items {
-		t, err := time.Parse(time.RFC3339, o.Updated)
+	for _, o := range objs {
+		oAttrs, err := o.Attrs(context.Background())
+		u, err := prepUrl(oAttrs.MediaLink)
 		if err != nil {
 			return nil, "", err
 		}
 
-		u, err := prepUrl(o.MediaLink)
+		mdParsed, err := parseMetadata(oAttrs.Metadata)
 		if err != nil {
 			return nil, "", err
 		}
 
-		mdParsed, err := parseMetadata(o.Metadata)
-		if err != nil {
-			return nil, "", err
-		}
-
-		containerItems[i] = &Item{
-			name:         o.Name,
+		containerItems = append(containerItems, &Item{
+			name:         oAttrs.Name,
 			container:    c,
 			client:       c.client,
-			size:         int64(o.Size),
-			etag:         o.Etag,
-			hash:         o.Md5Hash,
-			lastModified: t,
+			size:         int64(oAttrs.Size),
+			hash:         fmt.Sprintf("%x", oAttrs.MD5),
+			lastModified: oAttrs.Updated,
 			url:          u,
 			metadata:     mdParsed,
 			object:       o,
-		}
+		})
 	}
 
-	return containerItems, res.NextPageToken, nil
+	return containerItems, nextToken, nil
 }
 
 func (c *Container) RemoveItem(id string) error {
-	return c.client.Objects.Delete(c.name, id).Do()
+	return c.client.Bucket(c.name).Object(id).Delete(context.Background())
 }
 
 // Put sends a request to upload content to the container. The arguments
 // received are the name of the item, a reader representing the
 // content, and the size of the file.
 func (c *Container) Put(name string, r io.Reader, size int64, metadata map[string]interface{}) (stow.Item, error) {
-	mdPrepped, err := prepMetadata(metadata)
+	obj := c.client.Bucket(c.name).Object(name)
+	wc := obj.NewWriter(context.Background())
+
+	size, err := io.Copy(wc, r)
 	if err != nil {
 		return nil, err
 	}
 
-	object := &storage.Object{
-		Name:     name,
-		Metadata: mdPrepped,
-	}
-
-	res, err := c.client.Objects.Insert(c.name, object).Media(r).Do()
-	if err != nil {
+	if err := wc.Close(); err != nil {
 		return nil, err
 	}
 
-	t, err := time.Parse(time.RFC3339, res.Updated)
+	res, err := obj.Attrs(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -166,12 +157,11 @@ func (c *Container) Put(name string, r io.Reader, size int64, metadata map[strin
 		container:    c,
 		client:       c.client,
 		size:         size,
-		etag:         res.Etag,
-		hash:         res.Md5Hash,
-		lastModified: t,
+		hash:         fmt.Sprintf("%x", res.MD5),
+		lastModified: res.Updated,
 		url:          u,
 		metadata:     mdParsed,
-		object:       res,
+		object:       obj,
 	}
 	return newItem, nil
 }
