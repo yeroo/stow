@@ -14,11 +14,10 @@ Use a type conversion to extract the underlying `Location`, `Container`, or `Ite
 import (
   "log"
   "github.com/graymeta/stow"
-  stowgs "github.com/graymeta/stow/google"
+  stowgs "github.com/yeroo/stow/google"
 )
 
 stowLoc, err := stow.Dial(stowgs.Kind, stow.ConfigMap{
-	stowgs.ConfigJSON:      "<json config>",
 	stowgs.ConfigProjectId: "<project id>",
 })
 if err != nil {
@@ -42,12 +41,11 @@ if gsBucket, ok := stowBucket.(*stowgs.Bucket); ok {
 }
 ```
 
-By default, Stow uses `https://www.googleapis.com/auth/devstorage.read_write` scope. Different scopes can be used by passing a comma separated list of scopes, like below:
+Current config supports only google project id setting. Default google credentials will be used (very useful for Container Engine deployments)
+By default, Stow uses `https://www.googleapis.com/auth/devstorage.read_write` scope. New implementtion of google storage has no configurable scopes yet
 ```go
 stowLoc, err := stow.Dial(stowgs.Kind, stow.ConfigMap{
-	stowgs.ConfigJSON:      "<json config>",
 	stowgs.ConfigProjectId: "<project id>",
-	stowgs.ConfigScopes:    "<scope_1>,<scope_2>",
 })
 ```
 
